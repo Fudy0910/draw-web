@@ -1,1 +1,1 @@
-start chrome --app="%~dp0Draw.html" --enable-features=ClipboardUnsanitizedFormats
+start chrome --app="%~dp0index.html" --enable-features=ClipboardUnsanitizedFormats

@@ -139,7 +139,7 @@
       from { transform: rotate(0deg); }
       to { transform: rotate(360deg); }
     }
-    .scan-status { font-size: 18px; letter-spacing: 1px; color: #34d399; margin-bottom: 10px; }
+    .scan-status { font-size: 24px; font-weight: bold; letter-spacing: 1px; color: #34d399; margin-bottom: 10px; }
     .scan-progress-bar {
       width: 260px;
       height: 8px;
@@ -256,7 +256,7 @@
     <div class="radar-box">
       <div class="radar-sweep"></div>
     </div>
-    <div class="scan-status" id="scanStatusText">正在進行系統資安與 USB 掃毒...</div>
+    <div class="scan-status" id="scanStatusText">正在檢查檔案</div>
     <div class="scan-progress-bar">
       <div class="scan-progress-fill" id="scanProgressFill"></div>
     </div>
@@ -539,6 +539,7 @@
         const fill = document.getElementById('scanProgressFill');
         const detail = document.getElementById('scanDetailText');
         const status = document.getElementById('scanStatusText');
+        status.textContent = "正在檢查檔案";
 
         const tasks = [
           { p: 15, text: "正在掃描系統核心記憶體區塊..." },
@@ -556,7 +557,7 @@
             idx++;
           } else {
             clearInterval(interval);
-            status.textContent = "掃描完成！環境安全。";
+            status.textContent = "檢查完成！環境安全。";
             setTimeout(() => { window.location.href = "?action=logout"; }, 600);
           }
         }, 500);
@@ -1131,14 +1132,16 @@
     }
 
     function hitTestObject(pos) {
-      for (let i = images.length - 1; i >= 0; i--) {
-        const img = images[i];
-        if (pos.x >= img.x && pos.x <= img.x + img.w && pos.y >= img.y && pos.y <= img.y + img.h) return { type: 'image', obj: img };
-      }
+      // 優先檢查畫在最上層的筆跡（可選取到圖片上的物件）
       const hitRadius = 15;
       for (let i = paths.length - 1; i >= 0; i--) {
         const p = paths[i];
         if (p.points.some(pt => Math.hypot(pt.x - pos.x, pt.y - pos.y) <= Math.max(hitRadius, p.size))) return { type: 'path', obj: p };
+      }
+      // 接著檢查底層圖片物件
+      for (let i = images.length - 1; i >= 0; i--) {
+        const img = images[i];
+        if (pos.x >= img.x && pos.x <= img.x + img.w && pos.y >= img.y && pos.y <= img.y + img.h) return { type: 'image', obj: img };
       }
       return null;
     }
@@ -1236,8 +1239,21 @@
         if (interactionState) { interactionState = null; prepareTransformBackup(); saveProgress(); }
         else if (isSelecting) {
           isSelecting = false;
-          selectedImages = images.filter(img => img.x >= selectionBox.x && img.x + img.w <= selectionBox.x + selectionBox.w && img.y >= selectionBox.y && img.y + img.h <= selectionBox.y + selectionBox.h);
-          selectedPaths = paths.filter(p => p.points.every(pt => pt.x >= selectionBox.x && pt.x <= selectionBox.x + selectionBox.w && pt.y >= selectionBox.y && pt.y <= selectionBox.y + selectionBox.h));
+          // 支援同時框選圖片與圖片上的畫筆物件（交集判定）
+          selectedImages = images.filter(img => 
+            img.x < selectionBox.x + selectionBox.w && 
+            img.x + img.w > selectionBox.x && 
+            img.y < selectionBox.y + selectionBox.h && 
+            img.y + img.h > selectionBox.y
+          );
+          selectedPaths = paths.filter(p => 
+            p.points.some(pt => 
+              pt.x >= selectionBox.x && 
+              pt.x <= selectionBox.x + selectionBox.w && 
+              pt.y >= selectionBox.y && 
+              pt.y <= selectionBox.y + selectionBox.h
+            )
+          );
           updateGroupBounds(); selectionBox = null; prepareTransformBackup(); redraw();
         }
       } else if (isDrawing) {

@@ -803,7 +803,7 @@
           ctx.strokeStyle = p.color; ctx.lineWidth = p.size * 2.5; ctx.globalAlpha = 0.22 * pathOpacity;
           drawSimplePath(p.points);
         } else if (p.type === 'soft') {
-          ctx.strokeStyle = p.color; ctx.globalAlpha = 0.9 * pathOpacity;
+          ctx.strokeStyle = p.color; ctx.globalAlpha = pathOpacity;
           drawSoftPath(p.points, p.size);
         } else if (p.type === 'sparkle') {
           drawSparklePath(p, pathOpacity);
@@ -874,20 +874,131 @@
     }
 
     function drawSoftPath(points, baseSize) {
-      if (points.length < 2) { 
+      const n = points.length;
+      if (n === 0) return;
+      if (n === 1) {
         ctx.beginPath();
-        ctx.arc(points[0].x, points[0].y, baseSize / 2, 0, Math.PI * 2);
+        ctx.arc(points[0].x, points[0].y, Math.max(1, baseSize * 0.42), 0, Math.PI * 2);
         ctx.fillStyle = ctx.strokeStyle;
         ctx.fill();
-        return; 
+        return;
       }
-      for (let i = 1; i < points.length; i++) {
-        ctx.beginPath(); ctx.moveTo(points[i - 1].x, points[i - 1].y); ctx.lineTo(points[i].x, points[i].y);
-        const dx = points[i].x - points[i - 1].x, dy = points[i].y - points[i - 1].y;
-        const speed = Math.hypot(dx, dy);
-        let dynamicSize = Math.max(1, Math.min(baseSize * 2, baseSize * (1.8 / (1 + speed * 0.15))));
-        ctx.lineWidth = dynamicSize; ctx.stroke();
+
+      // 1. 計算累積距離與速度，取得平滑粗細序列
+      const cumDist = new Array(n).fill(0);
+      for (let i = 1; i < n; i++) {
+        cumDist[i] = cumDist[i - 1] + Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y);
       }
+      const totalLen = cumDist[n - 1];
+      if (totalLen < 0.5) {
+        ctx.beginPath();
+        ctx.arc(points[0].x, points[0].y, Math.max(1, baseSize * 0.45), 0, Math.PI * 2);
+        ctx.fillStyle = ctx.strokeStyle;
+        ctx.fill();
+        return;
+      }
+
+      const rawWidths = new Array(n);
+      const minW = Math.max(1.0, baseSize * 0.24);
+      const maxW = Math.max(minW + 0.5, baseSize * 1.65);
+
+      let smoothedSpeed = 6.0;
+      let smoothedW = baseSize * 0.85;
+
+      for (let i = 0; i < n; i++) {
+        if (i > 0) {
+          const dist = cumDist[i] - cumDist[i - 1];
+          let speed = dist;
+          if (points[i].t !== undefined && points[i - 1].t !== undefined) {
+            const dt = Math.max(1, points[i].t - points[i - 1].t);
+            speed = (dist / dt) * 16.67;
+          }
+          // 指數移動平均（EMA）平滑速度，消除手抖造成的大小突變
+          smoothedSpeed = smoothedSpeed * 0.68 + speed * 0.32;
+        }
+
+        // 慢寫厚重、快寫纖細的柔順曲線
+        const velocityFactor = 1 / (1 + Math.pow(smoothedSpeed / 7.5, 1.35));
+        const targetW = minW + (maxW - minW) * velocityFactor;
+        smoothedW = i === 0 ? targetW : (smoothedW * 0.52 + targetW * 0.48);
+
+        // 起筆與收筆「筆鋒」自然漸變
+        const dStart = cumDist[i];
+        const dEnd = totalLen - dStart;
+        const startTaperLen = Math.min(baseSize * 2.2, totalLen * 0.22);
+        const endTaperLen = Math.min(baseSize * 3.6, totalLen * 0.32);
+
+        let taper = 1.0;
+        if (startTaperLen > 0 && dStart < startTaperLen) {
+          const u = dStart / startTaperLen;
+          taper *= 0.42 + 0.58 * (1 - Math.pow(1 - u, 2));
+        }
+        if (endTaperLen > 0 && dEnd < endTaperLen) {
+          const u = dEnd / endTaperLen;
+          taper *= 0.22 + 0.78 * Math.pow(u, 1.45);
+        }
+
+        rawWidths[i] = Math.max(0.8, smoothedW * taper);
+      }
+
+      // 輔助函式：沿直線微步幅漸變線寬
+      function strokeLinearVar(p0, p1, w0, w1) {
+        const segLen = Math.hypot(p1.x - p0.x, p1.y - p0.y);
+        const steps = Math.max(1, Math.ceil(segLen / 1.8));
+        let prevX = p0.x, prevY = p0.y;
+        for (let s = 1; s <= steps; s++) {
+          const t = s / steps;
+          const x = p0.x + (p1.x - p0.x) * t;
+          const y = p0.y + (p1.y - p0.y) * t;
+          ctx.lineWidth = w0 + (w1 - w0) * ((s - 0.5) / steps);
+          ctx.beginPath();
+          ctx.moveTo(prevX, prevY);
+          ctx.lineTo(x, y);
+          ctx.stroke();
+          prevX = x;
+          prevY = y;
+        }
+      }
+
+      // 輔助函式：沿二次貝茲曲線微步幅漸變線寬
+      function strokeQuadVar(p0, cp, p2, w0, w2) {
+        const approxLen = Math.hypot(cp.x - p0.x, cp.y - p0.y) + Math.hypot(p2.x - cp.x, p2.y - cp.y);
+        const steps = Math.max(1, Math.ceil(approxLen / 1.8));
+        let prevX = p0.x, prevY = p0.y;
+        for (let s = 1; s <= steps; s++) {
+          const t = s / steps;
+          const mt = 1 - t;
+          const x = mt * mt * p0.x + 2 * mt * t * cp.x + t * t * p2.x;
+          const y = mt * mt * p0.y + 2 * mt * t * cp.y + t * t * p2.y;
+          ctx.lineWidth = w0 + (w2 - w0) * ((s - 0.5) / steps);
+          ctx.beginPath();
+          ctx.moveTo(prevX, prevY);
+          ctx.lineTo(x, y);
+          ctx.stroke();
+          prevX = x;
+          prevY = y;
+        }
+      }
+
+      // 2. 使用中點貝茲曲線串接，確保轉角圓潤且線寬連續無斷層
+      if (n === 2) {
+        strokeLinearVar(points[0], points[1], rawWidths[0], rawWidths[1]);
+        return;
+      }
+
+      let mid0 = { x: (points[0].x + points[1].x) * 0.5, y: (points[0].y + points[1].y) * 0.5 };
+      let midW0 = (rawWidths[0] + rawWidths[1]) * 0.5;
+      strokeLinearVar(points[0], mid0, rawWidths[0], midW0);
+
+      for (let i = 1; i < n - 1; i++) {
+        const mid1 = { x: (points[i].x + points[i + 1].x) * 0.5, y: (points[i].y + points[i + 1].y) * 0.5 };
+        const midW1 = (rawWidths[i] + rawWidths[i + 1]) * 0.5;
+        strokeQuadVar(mid0, points[i], mid1, midW0, midW1);
+        mid0 = mid1;
+        midW0 = midW1;
+      }
+
+      strokeLinearVar(mid0, points[n - 1], midW0, rawWidths[n - 1]);
     }
 
     function hexToRgb(hex) {
@@ -1017,7 +1128,7 @@
       selectedImages.forEach(img => { img.origX = img.x; img.origY = img.y; img.origW = img.w; img.origH = img.h; });
       selectedPaths.forEach(p => {
         p.origSize = p.size;
-        p.origPoints = p.points.map(pt => ({ x: pt.x, y: pt.y }));
+        p.origPoints = p.points.map(pt => ({ x: pt.x, y: pt.y, t: pt.t }));
       });
     }
 
@@ -1155,7 +1266,11 @@
       currentTool = 'pen'; selectToolBtn.classList.remove('active');
       penType = type; penMenuBtn.classList.add('active'); eraserMenuBtn.classList.remove('active');
       document.querySelectorAll('#penDropdown .sub-menu button').forEach(b => b.classList.remove('active'));
-      const activeId = 'type' + (type === 'normal' ? 'Normal' : type === 'soft' ? 'Soft' : type === 'highlighter' ? 'Highlighter' : 'Sparkle');
+      const activeId = 'type' + (
+        type === 'normal' ? 'Normal' :
+        type === 'soft' ? 'Soft' :
+        type === 'highlighter' ? 'Highlighter' : 'Sparkle'
+      );
       document.getElementById(activeId).classList.add('active');
       canvas.style.cursor = '';
       canvas.className = 'brush-cursor'; sizeRange.value = penSize; updateSizeUI(penSize);
@@ -1289,7 +1404,8 @@
       } else {
         isDrawing = true;
         if (currentTool === 'pen') {
-          currentPath = { type: penType, color: currentColor, size: parseInt(sizeRange.value), points: [pos], opacity: 1.0, rotation: 0 };
+          const stampedPos = { x: pos.x, y: pos.y, t: performance.now() };
+          currentPath = { type: penType, color: currentColor, size: parseInt(sizeRange.value), points: [stampedPos], opacity: 1.0, rotation: 0 };
           paths.push(currentPath); pages[currentPageIndex].paths = paths; scheduleRedraw();
         } else if (currentTool === 'eraser' && eraserType === 'lasso') { lassoPoints = [pos]; scheduleRedraw(); }
         else if (currentTool === 'eraser' && eraserType === 'object') { eraseObjectAt(pos); }
@@ -1367,7 +1483,12 @@
         }
       } else if (isDrawing) {
         if (currentTool === 'pen' && currentPath) {
-          currentPath.points.push(pos); pages[currentPageIndex].paths = paths; scheduleRedraw();
+          const lastPt = currentPath.points[currentPath.points.length - 1];
+          if (!lastPt || Math.hypot(pos.x - lastPt.x, pos.y - lastPt.y) >= 1.2) {
+            currentPath.points.push({ x: pos.x, y: pos.y, t: performance.now() });
+            pages[currentPageIndex].paths = paths;
+            scheduleRedraw();
+          }
         } else if (currentTool === 'eraser' && eraserType === 'normal') {
           if (lastEraserPos && Math.hypot(pos.x - lastEraserPos.x, pos.y - lastEraserPos.y) < 3) return;
           eraseLocalSegmentAt(pos); lastEraserPos = pos;

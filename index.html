@@ -225,7 +225,15 @@
     #canvasMenu button { background: transparent; border: none; padding: 6px 12px; text-align: left; font-size: 13px; cursor: pointer; color: #333; border-radius: 4px; height: auto; width: auto; }
     #canvasMenu button:hover { background: #f0f0f0; color: #007bff; }
 
-    #snippingLayer { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 99999; display: none; cursor: crosshair; }
+    /* 截圖層：自訂 + 游標並將熱點設為左上角 (0 0) */
+    #snippingLayer {
+      position: fixed;
+      top: 0; left: 0;
+      width: 100vw; height: 100vh;
+      z-index: 99999;
+      display: none;
+      cursor: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><path d="M12 1v22M1 12h22" stroke="%23ffffff" stroke-width="4" stroke-linecap="square"/><path d="M12 1v22M1 12h22" stroke="%23000000" stroke-width="2" stroke-linecap="square"/></svg>') 0 0, crosshair;
+    }
     .page-indicator { background: #444; color: #ffc107; padding: 6px 2px; border-radius: 6px; font-size: 11px; font-weight: bold; text-align: center; width: 56px; }
   </style>
 </head>
@@ -629,6 +637,7 @@
     let interactionState = null;
     let dragStartX = 0, dragStartY = 0;
     let groupBounds = null;
+    let origGroupBounds = null;
     let clipboard = { paths: [], images: [] };
 
     let isSnipping = false;
@@ -639,6 +648,16 @@
     let startPos = { x: 0, y: 0 };
     let menuOpenPos = { x: 100, y: 100 };
     let sparkleAnimFrame = null;
+    let redrawPending = false;
+
+    function scheduleRedraw() {
+      if (redrawPending) return;
+      redrawPending = true;
+      requestAnimationFrame(() => {
+        redrawPending = false;
+        redraw();
+      });
+    }
 
     function saveProgress() {
       try {
@@ -703,7 +722,7 @@
       currentPageIndex = index;
       paths = pages[currentPageIndex].paths;
       images = pages[currentPageIndex].images;
-      selectedPaths = []; selectedImages = []; groupBounds = null;
+      selectedPaths = []; selectedImages = []; groupBounds = null; origGroupBounds = null;
       opacitySubPanel.classList.remove('show');
       updatePageIndicator();
       redraw();
@@ -735,8 +754,8 @@
       if (sparkleAnimFrame) cancelAnimationFrame(sparkleAnimFrame);
       function loop() {
         const hasSparkle = paths.some(p => p.type === 'sparkle');
-        if (hasSparkle) {
-          redraw();
+        if (hasSparkle && !interactionState) {
+          scheduleRedraw();
         }
         sparkleAnimFrame = requestAnimationFrame(loop);
       }
@@ -898,6 +917,7 @@
     selectToolBtn.addEventListener('click', () => {
       currentTool = 'select'; selectToolBtn.classList.add('active');
       penMenuBtn.classList.remove('active'); eraserMenuBtn.classList.remove('active');
+      canvas.style.cursor = '';
       canvas.className = 'select-cursor'; penDropdown.classList.remove('show-sub'); eraserDropdown.classList.remove('show-sub');
       advancedPanel.classList.remove('show'); redraw();
     });
@@ -935,7 +955,7 @@
       selectedImages.forEach(img => img.opacity = val);
       selectedPaths.forEach(p => p.opacity = val);
       pages[currentPageIndex].paths = paths; pages[currentPageIndex].images = images;
-      redraw(); saveProgress();
+      scheduleRedraw(); saveProgress();
     });
 
     document.getElementById('menuSelect').addEventListener('click', () => { objectMenu.classList.remove('show'); opacitySubPanel.classList.remove('show'); });
@@ -951,7 +971,7 @@
       paths = paths.filter(p => !selectedPaths.includes(p));
       images = images.filter(img => !selectedImages.includes(img));
       pages[currentPageIndex].paths = paths; pages[currentPageIndex].images = images;
-      selectedPaths = []; selectedImages = []; groupBounds = null;
+      selectedPaths = []; selectedImages = []; groupBounds = null; origGroupBounds = null;
       redraw(); saveProgress();
     }
 
@@ -993,8 +1013,12 @@
     }
 
     function prepareTransformBackup() {
+      origGroupBounds = groupBounds ? { x: groupBounds.x, y: groupBounds.y, w: groupBounds.w, h: groupBounds.h } : null;
       selectedImages.forEach(img => { img.origX = img.x; img.origY = img.y; img.origW = img.w; img.origH = img.h; });
-      selectedPaths.forEach(p => { p.origPoints = p.points.map(pt => ({ x: pt.x, y: pt.y })); });
+      selectedPaths.forEach(p => {
+        p.origSize = p.size;
+        p.origPoints = p.points.map(pt => ({ x: pt.x, y: pt.y }));
+      });
     }
 
     screenshotBtn.addEventListener('click', async () => {
@@ -1010,8 +1034,13 @@
             capturedScreenImg = new Image();
             capturedScreenImg.onload = () => {
               stream.getTracks().forEach(track => track.stop());
-              snippingLayer.width = window.innerWidth; snippingLayer.height = window.innerHeight;
-              snippingLayer.style.display = 'block'; renderSnippingOverlay(0, 0, 0, 0);
+              const dpr = window.devicePixelRatio || 1;
+              snippingLayer.width = window.innerWidth * dpr;
+              snippingLayer.height = window.innerHeight * dpr;
+              snipCtx.resetTransform();
+              snipCtx.scale(dpr, dpr);
+              snippingLayer.style.display = 'block';
+              renderSnippingOverlay(0, 0, 0, 0);
             };
             capturedScreenImg.src = tempCanvas.toDataURL('image/png');
           }, 200);
@@ -1020,38 +1049,85 @@
     });
 
     function renderSnippingOverlay(x1, y1, x2, y2) {
-      snipCtx.clearRect(0, 0, snippingLayer.width, snippingLayer.height);
-      snipCtx.drawImage(capturedScreenImg, 0, 0, snippingLayer.width, snippingLayer.height);
-      snipCtx.fillStyle = 'rgba(0, 0, 0, 0.45)'; snipCtx.fillRect(0, 0, snippingLayer.width, snippingLayer.height);
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      snipCtx.clearRect(0, 0, vw, vh);
+      snipCtx.drawImage(capturedScreenImg, 0, 0, vw, vh);
+      snipCtx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+      snipCtx.fillRect(0, 0, vw, vh);
       if (x1 !== x2 || y1 !== y2) {
         const rx = Math.min(x1, x2), ry = Math.min(y1, y2), rw = Math.abs(x2 - x1), rh = Math.abs(y2 - y1);
         snipCtx.save(); snipCtx.beginPath(); snipCtx.rect(rx, ry, rw, rh); snipCtx.clip();
-        snipCtx.drawImage(capturedScreenImg, 0, 0, snippingLayer.width, snippingLayer.height);
+        snipCtx.drawImage(capturedScreenImg, 0, 0, vw, vh);
         snipCtx.restore();
         snipCtx.strokeStyle = '#007bff'; snipCtx.lineWidth = 2; snipCtx.strokeRect(rx, ry, rw, rh);
       }
     }
 
-    snippingLayer.addEventListener('mousedown', (e) => { isSnipping = true; snipStartX = e.clientX; snipStartY = e.clientY; snipEndX = snipStartX; snipEndY = snipStartY; });
-    snippingLayer.addEventListener('mousemove', (e) => { if (!isSnipping) return; snipEndX = e.clientX; snipEndY = e.clientY; renderSnippingOverlay(snipStartX, snipStartY, snipEndX, snipEndY); });
-    snippingLayer.addEventListener('mouseup', (e) => {
-      if (!isSnipping) return; isSnipping = false; snippingLayer.style.display = 'none';
+    function getSnipPos(e) {
+      if (e.touches && e.touches.length > 0) {
+        return { x: e.touches[0].clientX, y: e.touches[0].clientY };
+      }
+      if (e.changedTouches && e.changedTouches.length > 0) {
+        return { x: e.changedTouches[0].clientX, y: e.changedTouches[0].clientY };
+      }
+      return { x: e.clientX, y: e.clientY };
+    }
+
+    function startSnip(e) {
+      if (e.cancelable) e.preventDefault();
+      const pos = getSnipPos(e);
+      isSnipping = true;
+      snipStartX = pos.x;
+      snipStartY = pos.y;
+      snipEndX = snipStartX;
+      snipEndY = snipStartY;
+    }
+
+    function moveSnip(e) {
+      if (!isSnipping) return;
+      if (e.cancelable) e.preventDefault();
+      const pos = getSnipPos(e);
+      snipEndX = pos.x;
+      snipEndY = pos.y;
+      renderSnippingOverlay(snipStartX, snipStartY, snipEndX, snipEndY);
+    }
+
+    function endSnip(e) {
+      if (!isSnipping) return;
+      if (e && e.cancelable) e.preventDefault();
+      isSnipping = false;
+      snippingLayer.style.display = 'none';
       const rx = Math.min(snipStartX, snipEndX), ry = Math.min(snipStartY, snipEndY);
       const rw = Math.abs(snipEndX - snipStartX), rh = Math.abs(snipEndY - snipStartY);
       if (rw > 10 && rh > 10) {
+        const dpr = window.devicePixelRatio || 1;
         const cropCanvas = document.createElement('canvas');
-        cropCanvas.width = rw; cropCanvas.height = rh;
+        cropCanvas.width = Math.round(rw * dpr);
+        cropCanvas.height = Math.round(rh * dpr);
         const scaleX = capturedScreenImg.width / window.innerWidth;
         const scaleY = capturedScreenImg.height / window.innerHeight;
-        cropCanvas.getContext('2d').drawImage(capturedScreenImg, rx * scaleX, ry * scaleY, rw * scaleX, rh * scaleY, 0, 0, rw, rh);
+        cropCanvas.getContext('2d').drawImage(
+          capturedScreenImg,
+          rx * scaleX, ry * scaleY, rw * scaleX, rh * scaleY,
+          0, 0, cropCanvas.width, cropCanvas.height
+        );
+        const dataUrl = cropCanvas.toDataURL('image/png');
         const newImg = new Image();
         newImg.onload = () => {
-          images.push({ img: newImg, x: rx, y: ry, w: rw, h: rh, src: cropCanvas.toDataURL('image/png'), opacity: 1.0, rotation: 0 });
+          images.push({ img: newImg, x: rx, y: ry, w: rw, h: rh, src: dataUrl, opacity: 1.0, rotation: 0 });
           pages[currentPageIndex].images = images; redraw(); saveProgress();
         };
-        newImg.src = cropCanvas.toDataURL('image/png');
+        newImg.src = dataUrl;
       }
-    });
+    }
+
+    snippingLayer.addEventListener('mousedown', startSnip);
+    snippingLayer.addEventListener('mousemove', moveSnip);
+    snippingLayer.addEventListener('mouseup', endSnip);
+    snippingLayer.addEventListener('touchstart', startSnip, { passive: false });
+    snippingLayer.addEventListener('touchmove', moveSnip, { passive: false });
+    snippingLayer.addEventListener('touchend', endSnip, { passive: false });
 
     penMenuBtn.addEventListener('click', (e) => { e.stopPropagation(); penDropdown.classList.toggle('show-sub'); eraserDropdown.classList.remove('show-sub'); advancedPanel.classList.remove('show'); });
     eraserMenuBtn.addEventListener('click', (e) => { e.stopPropagation(); eraserDropdown.classList.toggle('show-sub'); penDropdown.classList.remove('show-sub'); advancedPanel.classList.remove('show'); });
@@ -1081,8 +1157,9 @@
       document.querySelectorAll('#penDropdown .sub-menu button').forEach(b => b.classList.remove('active'));
       const activeId = 'type' + (type === 'normal' ? 'Normal' : type === 'soft' ? 'Soft' : type === 'highlighter' ? 'Highlighter' : 'Sparkle');
       document.getElementById(activeId).classList.add('active');
+      canvas.style.cursor = '';
       canvas.className = 'brush-cursor'; sizeRange.value = penSize; updateSizeUI(penSize);
-      selectedPaths = []; selectedImages = []; groupBounds = null; redraw();
+      selectedPaths = []; selectedImages = []; groupBounds = null; origGroupBounds = null; redraw();
     }
     document.getElementById('typeNormal').addEventListener('click', (e) => { e.stopPropagation(); setPenType('normal'); penDropdown.classList.remove('show-sub'); });
     document.getElementById('typeSoft').addEventListener('click', (e) => { e.stopPropagation(); setPenType('soft'); penDropdown.classList.remove('show-sub'); });
@@ -1094,8 +1171,9 @@
       eraserType = type; eraserMenuBtn.classList.add('active'); penMenuBtn.classList.remove('active');
       document.querySelectorAll('#eraserDropdown .sub-menu button').forEach(b => b.classList.remove('active'));
       document.getElementById('erase' + (type === 'normal' ? 'Normal' : type === 'object' ? 'Object' : 'Lasso')).classList.add('active');
+      canvas.style.cursor = '';
       canvas.className = 'eraser-cursor'; sizeRange.value = eraserSize; updateSizeUI(eraserSize);
-      selectedPaths = []; selectedImages = []; groupBounds = null; redraw();
+      selectedPaths = []; selectedImages = []; groupBounds = null; origGroupBounds = null; redraw();
     }
     document.getElementById('eraseNormal').addEventListener('click', (e) => { e.stopPropagation(); setEraserType('normal'); eraserDropdown.classList.remove('show-sub'); });
     document.getElementById('eraseObject').addEventListener('click', (e) => { e.stopPropagation(); setEraserType('object'); eraserDropdown.classList.remove('show-sub'); });
@@ -1132,13 +1210,11 @@
     }
 
     function hitTestObject(pos) {
-      // 優先檢查畫在最上層的筆跡（可選取到圖片上的物件）
       const hitRadius = 15;
       for (let i = paths.length - 1; i >= 0; i--) {
         const p = paths[i];
         if (p.points.some(pt => Math.hypot(pt.x - pos.x, pt.y - pos.y) <= Math.max(hitRadius, p.size))) return { type: 'path', obj: p };
       }
-      // 接著檢查底層圖片物件
       for (let i = images.length - 1; i >= 0; i--) {
         const img = images[i];
         if (pos.x >= img.x && pos.x <= img.x + img.w && pos.y >= img.y && pos.y <= img.y + img.h) return { type: 'image', obj: img };
@@ -1146,17 +1222,55 @@
       return null;
     }
 
+    function updateSelectCursor(pos) {
+      if (currentTool !== 'select' || interactionState) return;
+      if (groupBounds) {
+        const rotX = groupBounds.x + groupBounds.w / 2, rotY = groupBounds.y - 20;
+        if (Math.hypot(pos.x - rotX, pos.y - rotY) < 15) {
+          canvas.style.cursor = 'grab';
+          return;
+        }
+        const swX = groupBounds.x, swY = groupBounds.y + groupBounds.h;
+        if (Math.hypot(pos.x - swX, pos.y - swY) < 18) {
+          canvas.style.cursor = 'nesw-resize';
+          return;
+        }
+        if (pos.x >= groupBounds.x && pos.x <= groupBounds.x + groupBounds.w && pos.y >= groupBounds.y && pos.y <= groupBounds.y + groupBounds.h) {
+          canvas.style.cursor = 'move';
+          return;
+        }
+      }
+      canvas.style.cursor = 'default';
+    }
+
     function startAction(e) {
       const pos = getPosition(e);
       if (currentTool === 'select') {
         if (groupBounds) {
           const rotX = groupBounds.x + groupBounds.w / 2, rotY = groupBounds.y - 20;
-          if (Math.hypot(pos.x - rotX, pos.y - rotY) < 15) { interactionState = 'rotating'; dragStartX = rotX; dragStartY = rotY; return; }
+          if (Math.hypot(pos.x - rotX, pos.y - rotY) < 15) {
+            interactionState = 'rotating';
+            dragStartX = rotX; dragStartY = rotY;
+            prepareTransformBackup();
+            canvas.style.cursor = 'grabbing';
+            return;
+          }
           const swX = groupBounds.x, swY = groupBounds.y + groupBounds.h;
-          if (Math.hypot(pos.x - swX, pos.y - swY) < 18) { interactionState = 'resizing-sw'; dragStartX = pos.x; dragStartY = pos.y; return; }
+          if (Math.hypot(pos.x - swX, pos.y - swY) < 18) {
+            interactionState = 'resizing-sw';
+            dragStartX = pos.x; dragStartY = pos.y;
+            prepareTransformBackup();
+            canvas.style.cursor = 'nesw-resize';
+            objectMenu.classList.remove('show'); opacitySubPanel.classList.remove('show');
+            return;
+          }
           if (pos.x >= groupBounds.x && pos.x <= groupBounds.x + groupBounds.w && pos.y >= groupBounds.y && pos.y <= groupBounds.y + groupBounds.h) {
-            interactionState = 'dragging'; dragStartX = pos.x; dragStartY = pos.y;
-            objectMenu.classList.remove('show'); opacitySubPanel.classList.remove('show'); return;
+            interactionState = 'dragging';
+            dragStartX = pos.x; dragStartY = pos.y;
+            prepareTransformBackup();
+            canvas.style.cursor = 'move';
+            objectMenu.classList.remove('show'); opacitySubPanel.classList.remove('show');
+            return;
           }
         }
         const hit = hitTestObject(pos);
@@ -1165,18 +1279,19 @@
           selectedImages = hit.type === 'image' ? [hit.obj] : [];
           updateGroupBounds(); prepareTransformBackup(); interactionState = 'dragging';
           dragStartX = pos.x; dragStartY = pos.y;
+          canvas.style.cursor = 'move';
           objectMenu.classList.remove('show'); opacitySubPanel.classList.remove('show'); redraw(); return;
         }
         isSelecting = true; selectStartX = pos.x; selectStartY = pos.y;
         selectionBox = { x: pos.x, y: pos.y, w: 0, h: 0 };
-        selectedPaths = []; selectedImages = []; groupBounds = null;
+        selectedPaths = []; selectedImages = []; groupBounds = null; origGroupBounds = null;
         objectMenu.classList.remove('show'); opacitySubPanel.classList.remove('show'); redraw();
       } else {
         isDrawing = true;
         if (currentTool === 'pen') {
           currentPath = { type: penType, color: currentColor, size: parseInt(sizeRange.value), points: [pos], opacity: 1.0, rotation: 0 };
-          paths.push(currentPath); pages[currentPageIndex].paths = paths; redraw();
-        } else if (currentTool === 'eraser' && eraserType === 'lasso') { lassoPoints = [pos]; redraw(); }
+          paths.push(currentPath); pages[currentPageIndex].paths = paths; scheduleRedraw();
+        } else if (currentTool === 'eraser' && eraserType === 'lasso') { lassoPoints = [pos]; scheduleRedraw(); }
         else if (currentTool === 'eraser' && eraserType === 'object') { eraseObjectAt(pos); }
         else if (currentTool === 'eraser' && eraserType === 'normal') { lastEraserPos = pos; eraseLocalSegmentAt(pos); }
       }
@@ -1191,55 +1306,87 @@
           dragStartX = pos.x; dragStartY = pos.y;
           selectedPaths.forEach(p => p.points.forEach(pt => { pt.x += dx; pt.y += dy; }));
           selectedImages.forEach(img => { img.x += dx; img.y += dy; });
-          updateGroupBounds(); pages[currentPageIndex].paths = paths; pages[currentPageIndex].images = images; redraw();
-        } else if (interactionState === 'resizing-sw') {
-          const origRight = groupBounds.x + groupBounds.w, origTop = groupBounds.y, origW = groupBounds.w, origH = groupBounds.h;
-          const newW = Math.max(20, origRight - pos.x), newH = Math.max(20, pos.y - origTop);
-          const scaleX = newW / origW, scaleY = newH / origH, avgScale = (scaleX + scaleY) / 2;
+          updateGroupBounds(); pages[currentPageIndex].paths = paths; pages[currentPageIndex].images = images;
+          scheduleRedraw();
+        } else if (interactionState === 'resizing-sw' && origGroupBounds) {
+          const origRight = origGroupBounds.x + origGroupBounds.w;
+          const origTop = origGroupBounds.y;
+          const origW = origGroupBounds.w;
+          const origH = origGroupBounds.h;
+          const newW = Math.max(20, origRight - pos.x);
+          const newH = Math.max(20, pos.y - origTop);
+
+          let avgScale = 1;
+          if (origW < 2 && origH < 2) {
+            avgScale = 1;
+          } else if (origW < 2) {
+            avgScale = newH / origH;
+          } else if (origH < 2) {
+            avgScale = newW / origW;
+          } else {
+            const scaleX = newW / origW;
+            const scaleY = newH / origH;
+            avgScale = (scaleX + scaleY) / 2;
+          }
+
           selectedImages.forEach(img => {
             img.x = origRight + (img.origX - origRight) * avgScale;
             img.y = origTop + (img.origY - origTop) * avgScale;
-            img.w = img.origW * avgScale; img.h = img.origH * avgScale;
+            img.w = Math.max(10, img.origW * avgScale);
+            img.h = Math.max(10, img.origH * avgScale);
           });
           selectedPaths.forEach(p => {
+            if (p.origSize !== undefined) {
+              p.size = Math.max(1, p.origSize * avgScale);
+            }
             p.points.forEach((pt, idx) => {
               const origPt = p.origPoints[idx];
               pt.x = origRight + (origPt.x - origRight) * avgScale;
               pt.y = origTop + (origPt.y - origTop) * avgScale;
             });
           });
-          updateGroupBounds(); pages[currentPageIndex].paths = paths; pages[currentPageIndex].images = images; redraw();
+          updateGroupBounds();
+          pages[currentPageIndex].paths = paths;
+          pages[currentPageIndex].images = images;
+          scheduleRedraw();
         } else if (interactionState === 'rotating') {
           const cx = groupBounds.x + groupBounds.w / 2, cy = groupBounds.y + groupBounds.h / 2;
           const angle = Math.atan2(pos.y - cy, pos.x - cx) - Math.atan2(-20, 0);
           selectedImages.forEach(img => img.rotation = angle);
           selectedPaths.forEach(p => p.rotation = angle);
-          pages[currentPageIndex].paths = paths; pages[currentPageIndex].images = images; redraw();
+          pages[currentPageIndex].paths = paths; pages[currentPageIndex].images = images;
+          scheduleRedraw();
         } else if (isSelecting) {
           selectionBox.w = pos.x - selectStartX; selectionBox.h = pos.y - selectStartY;
           let rx = selectionBox.w < 0 ? selectStartX + selectionBox.w : selectStartX;
           let ry = selectionBox.h < 0 ? selectStartY + selectionBox.h : selectStartY;
           selectionBox = { x: rx, y: ry, w: Math.abs(selectionBox.w), h: Math.abs(selectionBox.h) };
-          redraw();
+          scheduleRedraw();
+        } else {
+          updateSelectCursor(pos);
         }
       } else if (isDrawing) {
         if (currentTool === 'pen' && currentPath) {
-          currentPath.points.push(pos); pages[currentPageIndex].paths = paths; redraw();
+          currentPath.points.push(pos); pages[currentPageIndex].paths = paths; scheduleRedraw();
         } else if (currentTool === 'eraser' && eraserType === 'normal') {
           if (lastEraserPos && Math.hypot(pos.x - lastEraserPos.x, pos.y - lastEraserPos.y) < 3) return;
           eraseLocalSegmentAt(pos); lastEraserPos = pos;
         } else if (currentTool === 'eraser' && eraserType === 'object') { eraseObjectAt(pos); }
-        else if (currentTool === 'eraser' && eraserType === 'lasso') { lassoPoints.push(pos); redraw(); }
+        else if (currentTool === 'eraser' && eraserType === 'lasso') { lassoPoints.push(pos); scheduleRedraw(); }
       }
     }
 
     function endAction() {
       lastEraserPos = null;
       if (currentTool === 'select') {
-        if (interactionState) { interactionState = null; prepareTransformBackup(); saveProgress(); }
-        else if (isSelecting) {
+        if (interactionState) {
+          interactionState = null;
+          canvas.style.cursor = 'default';
+          prepareTransformBackup();
+          redraw();
+          saveProgress();
+        } else if (isSelecting) {
           isSelecting = false;
-          // 支援同時框選圖片與圖片上的畫筆物件（交集判定）
           selectedImages = images.filter(img => 
             img.x < selectionBox.x + selectionBox.w && 
             img.x + img.w > selectionBox.x && 
@@ -1267,6 +1414,7 @@
     }
 
     canvas.addEventListener('touchstart', (e) => {
+      if (e.cancelable) e.preventDefault();
       const pos = getPosition(e); startPos = pos;
       if (currentTool === 'select' && !groupBounds) {
         clearTimeout(blankLongPressTimer);
@@ -1280,13 +1428,15 @@
       startAction(e);
     }, { passive: false });
 
-    canvas.addEventListener('touchmove', (e) => {
+    window.addEventListener('touchmove', (e) => {
+      if (!isDrawing && !interactionState && !isSelecting && !blankLongPressTimer) return;
       const pos = getPosition(e);
       if (Math.hypot(pos.x - startPos.x, pos.y - startPos.y) > 15) clearTimeout(blankLongPressTimer);
       moveAction(e);
     }, { passive: false });
 
-    canvas.addEventListener('touchend', () => { clearTimeout(blankLongPressTimer); endAction(); });
+    window.addEventListener('touchend', () => { clearTimeout(blankLongPressTimer); endAction(); });
+
     canvas.addEventListener('mousedown', (e) => {
       const pos = getPosition(e); startPos = pos;
       if (currentTool === 'select' && !groupBounds) {
@@ -1306,14 +1456,15 @@
       startAction(e);
     });
 
-    canvas.addEventListener('mousemove', (e) => {
+    window.addEventListener('mousemove', (e) => {
       const pos = getPosition(e);
       if (Math.hypot(pos.x - startPos.x, pos.y - startPos.y) > 15) clearTimeout(blankLongPressTimer);
-      moveAction(e);
+      if (isDrawing || interactionState || isSelecting || currentTool === 'select') {
+        moveAction(e);
+      }
     });
 
-    canvas.addEventListener('mouseup', () => { clearTimeout(blankLongPressTimer); endAction(); });
-    canvas.addEventListener('mouseleave', () => { clearTimeout(blankLongPressTimer); endAction(); });
+    window.addEventListener('mouseup', () => { clearTimeout(blankLongPressTimer); endAction(); });
     canvas.addEventListener('contextmenu', e => e.preventDefault());
 
     window.addEventListener('keydown', (e) => {
@@ -1342,7 +1493,7 @@
         });
         if (currentSegment.length > 0) newPaths.push({ type: p.type, color: p.color, size: p.size, opacity: p.opacity, rotation: p.rotation, points: currentSegment });
       });
-      if (changed) { paths = newPaths; pages[currentPageIndex].paths = paths; redraw(); }
+      if (changed) { paths = newPaths; pages[currentPageIndex].paths = paths; scheduleRedraw(); }
     }
 
     function eraseObjectAt(pos) {
@@ -1354,7 +1505,7 @@
       const imgCount = images.length;
       images = images.filter(img => !(pos.x >= img.x && pos.x <= img.x + img.w && pos.y >= img.y && pos.y <= img.y + img.h));
       if (images.length !== imgCount) changed = true;
-      if (changed) { pages[currentPageIndex].paths = paths; pages[currentPageIndex].images = images; redraw(); }
+      if (changed) { pages[currentPageIndex].paths = paths; pages[currentPageIndex].images = images; scheduleRedraw(); }
     }
 
     function isPointInPolygon(point, polygon) {
@@ -1369,7 +1520,7 @@
     clearBtn.addEventListener('click', () => {
       pages[currentPageIndex].paths = []; pages[currentPageIndex].images = [];
       paths = pages[currentPageIndex].paths; images = pages[currentPageIndex].images;
-      selectedPaths = []; selectedImages = []; groupBounds = null;
+      selectedPaths = []; selectedImages = []; groupBounds = null; origGroupBounds = null;
       topRightMenuWrapper.style.display = 'none'; objectMenu.classList.remove('show'); opacitySubPanel.classList.remove('show'); canvasMenu.style.display = 'none';
       redraw(); saveProgress();
     });

@@ -83,7 +83,7 @@
       border-radius: 8px;
       background: #2b3137;
       color: white;
-      font-size: 16px; /* 16px 可避免 iPad Safari 聚焦時自動放大畫面 */
+      font-size: 16px;
       outline: none;
     }
     .login-box input:focus { border-color: #007bff; }
@@ -194,7 +194,7 @@
     }
     .scan-detail { font-size: 12px; color: #9ca3af; }
 
-    /* 工具列固定於右側，並支援 iPad 安全區與捲動 */
+    /* 工具列固定於右側 */
     .toolbar {
       background: #333;
       color: white;
@@ -214,7 +214,7 @@
     .toolbar::-webkit-scrollbar { display: none; }
     .toolbar button, .toolbar label {
       width: 56px;
-      min-height: 52px;
+      min-height: 50px;
       padding: 4px 2px;
       border: none;
       border-radius: 10px;
@@ -229,8 +229,14 @@
       gap: 2px;
       text-align: center;
       flex-shrink: 0;
+      transition: opacity 0.15s ease, transform 0.1s ease;
     }
     .toolbar button:active { transform: scale(0.95); }
+    .toolbar button:disabled {
+      opacity: 0.35;
+      cursor: not-allowed;
+      pointer-events: none;
+    }
     .toolbar button.active { background: #007bff; }
     .toolbar button.danger { background: #dc3545; }
     .toolbar button.success { background: #28a745; }
@@ -240,11 +246,11 @@
     .toolbar button.logout:hover { background: #5a6268; }
 
     /* 圖示大小設定 */
-    .toolbar svg.icon { width: 26px; height: 26px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+    .toolbar svg.icon { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
     
     .dropdown-container { position: relative; width: 100%; display: flex; justify-content: center; flex-shrink: 0; }
     
-    /* 進階彈出面板（固定定位以便在可捲動工具列旁正常顯示） */
+    /* 進階彈出面板 */
     .advanced-panel {
       display: none;
       position: fixed;
@@ -465,7 +471,7 @@
 
   <canvas id="snippingLayer"></canvas>
 
-  <!-- 隱藏檔案選擇器（專供 iPad 點擊匯入 PDF 與圖片） -->
+  <!-- 隱藏檔案選擇器（專供點擊匯入 PDF 與圖片） -->
   <input type="file" id="filePickerInput" accept=".pdf,application/pdf,image/*" multiple style="display:none;">
 
   <!-- 右側工具列 -->
@@ -568,6 +574,23 @@
         </div>
       </div>
     </div>
+
+    <!-- 上一步 / 下一步 功能鍵 -->
+    <button id="undoBtn" title="上一步 (Ctrl+Z)" disabled>
+      <svg class="icon" viewBox="0 0 24 24">
+        <path d="M9 14L4 9l5-5"/>
+        <path d="M20 20v-7a4 4 0 0 0-4-4H4"/>
+      </svg>
+      上一步
+    </button>
+
+    <button id="redoBtn" title="下一步 (Ctrl+Y)" disabled>
+      <svg class="icon" viewBox="0 0 24 24">
+        <path d="M15 14l5-5-5-5"/>
+        <path d="M4 20v-7a4 4 0 0 1 4-4h12"/>
+      </svg>
+      下一步
+    </button>
 
     <button id="openFileBtn" class="info" title="開啟 PDF 或圖片檔案">
       <svg class="icon" viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
@@ -727,7 +750,7 @@
     }
 
     function checkLogin() {
-      getAudioCtx(); // 在 iPad 使用者點擊當下解鎖音效權限
+      getAudioCtx();
       loginError.style.display = 'none';
       loginSpinner.style.display = 'inline-block';
       loginBtnText.textContent = "驗證中...";
@@ -810,11 +833,18 @@
     const panelCloseBtn = document.getElementById('panelCloseBtn');
     const panelTabs = document.querySelectorAll('.panel-tab');
     const tabContents = document.querySelectorAll('.tab-content');
+    const colorTabBtn = document.querySelector('.panel-tab[data-tab="colorTab"]');
+    const widthTabBtn = document.querySelector('.panel-tab[data-tab="widthTab"]');
+    const colorTabContent = document.getElementById('colorTab');
+    const widthTabContent = document.getElementById('widthTab');
     
     const sizeRange = document.getElementById('sizeRange');
     const sizeLabelTitle = document.getElementById('sizeLabelTitle');
     const sizePreviewDot = document.getElementById('sizePreviewDot');
     const sizePresetBtns = document.querySelectorAll('.size-preset-btn');
+
+    const undoBtn = document.getElementById('undoBtn');
+    const redoBtn = document.getElementById('redoBtn');
 
     const openFileBtn = document.getElementById('openFileBtn');
     const filePickerInput = document.getElementById('filePickerInput');
@@ -848,8 +878,9 @@
     let currentColor = '#000000';
     let penSize = 8;
     let eraserSize = 20;
+    let activeTouchEraserPos = null;
 
-    let pages = [{ paths: [], images: [] }];
+    let pages = [{ paths: [], images: [], undoStack: [], redoStack: [] }];
     let currentPageIndex = 0;
     let paths = pages[0].paths;
     let images = pages[0].images;
@@ -877,6 +908,177 @@
     let sparkleAnimFrame = null;
     let redrawPending = false;
 
+    // =========================================================
+    // 上一步 (Undo) / 下一步 (Redo) 歷史紀錄系統
+    // =========================================================
+    const MAX_HISTORY = 50;
+    const imageCache = new Map();
+    let pendingHistorySnapshot = null;
+    let opacityDragSnapshot = null;
+
+    function getCachedImage(src, onLoadCallback) {
+      if (imageCache.has(src)) {
+        const cached = imageCache.get(src);
+        if (cached.complete && cached.naturalWidth > 0) {
+          return cached;
+        }
+      }
+      const img = new Image();
+      img.onload = () => {
+        imageCache.set(src, img);
+        if (onLoadCallback) onLoadCallback(img);
+      };
+      img.src = src;
+      imageCache.set(src, img);
+      return img;
+    }
+
+    function capturePageState(pageIdx = currentPageIndex) {
+      const targetPage = pages[pageIdx];
+      return {
+        paths: targetPage.paths.map(p => ({
+          type: p.type,
+          color: p.color,
+          size: p.size,
+          opacity: p.opacity !== undefined ? p.opacity : 1.0,
+          rotation: p.rotation || 0,
+          points: p.points.map(pt => ({ x: pt.x, y: pt.y, t: pt.t, p: pt.p }))
+        })),
+        images: targetPage.images.map(img => ({
+          x: img.x,
+          y: img.y,
+          w: img.w,
+          h: img.h,
+          src: img.src,
+          opacity: img.opacity !== undefined ? img.opacity : 1.0,
+          rotation: img.rotation || 0
+        }))
+      };
+    }
+
+    function isSamePageState(s1, s2) {
+      if (!s1 || !s2) return false;
+      if (s1.paths.length !== s2.paths.length || s1.images.length !== s2.images.length) return false;
+      return JSON.stringify(s1) === JSON.stringify(s2);
+    }
+
+    function restorePageState(snapshot, pageIdx = currentPageIndex) {
+      const targetPage = pages[pageIdx];
+      targetPage.paths = snapshot.paths.map(p => ({
+        type: p.type,
+        color: p.color,
+        size: p.size,
+        opacity: p.opacity !== undefined ? p.opacity : 1.0,
+        rotation: p.rotation || 0,
+        points: p.points.map(pt => ({ x: pt.x, y: pt.y, t: pt.t, p: pt.p }))
+      }));
+
+      targetPage.images = snapshot.images.map(imgItem => {
+        const img = getCachedImage(imgItem.src, () => {
+          if (pageIdx === currentPageIndex) redraw();
+        });
+        if (img.complete && img.naturalWidth > 0) {
+          imageCache.set(imgItem.src, img);
+        }
+        return {
+          img: img,
+          x: imgItem.x,
+          y: imgItem.y,
+          w: imgItem.w,
+          h: imgItem.h,
+          src: imgItem.src,
+          opacity: imgItem.opacity !== undefined ? imgItem.opacity : 1.0,
+          rotation: imgItem.rotation || 0
+        };
+      });
+
+      if (pageIdx === currentPageIndex) {
+        paths = targetPage.paths;
+        images = targetPage.images;
+      }
+    }
+
+    function pushHistorySnapshot(snapshot, pageIdx = currentPageIndex) {
+      if (!snapshot) return;
+      const targetPage = pages[pageIdx];
+      if (!targetPage.undoStack) targetPage.undoStack = [];
+      if (!targetPage.redoStack) targetPage.redoStack = [];
+
+      targetPage.undoStack.push(snapshot);
+      if (targetPage.undoStack.length > MAX_HISTORY) {
+        targetPage.undoStack.shift();
+      }
+      targetPage.redoStack = [];
+      if (pageIdx === currentPageIndex) updateUndoRedoButtons();
+    }
+
+    function recordUndoStep(pageIdx = currentPageIndex) {
+      pushHistorySnapshot(capturePageState(pageIdx), pageIdx);
+    }
+
+    function updateUndoRedoButtons() {
+      const page = pages[currentPageIndex];
+      const canUndo = page && page.undoStack && page.undoStack.length > 0;
+      const canRedo = page && page.redoStack && page.redoStack.length > 0;
+      undoBtn.disabled = !canUndo;
+      redoBtn.disabled = !canRedo;
+    }
+
+    function resetSelectionState() {
+      selectedPaths = [];
+      selectedImages = [];
+      groupBounds = null;
+      origGroupBounds = null;
+      selectionBox = null;
+      isSelecting = false;
+      interactionState = null;
+      topRightMenuWrapper.style.display = 'none';
+      objectMenu.classList.remove('show');
+      opacitySubPanel.classList.remove('show');
+      canvasMenu.style.display = 'none';
+    }
+
+    function undoAction() {
+      const page = pages[currentPageIndex];
+      if (!page || !page.undoStack || page.undoStack.length === 0) return;
+
+      const currentSnapshot = capturePageState(currentPageIndex);
+      page.redoStack.push(currentSnapshot);
+      const prevSnapshot = page.undoStack.pop();
+
+      resetSelectionState();
+      restorePageState(prevSnapshot, currentPageIndex);
+      updateUndoRedoButtons();
+      redraw();
+      saveProgress();
+    }
+
+    function redoAction() {
+      const page = pages[currentPageIndex];
+      if (!page || !page.redoStack || page.redoStack.length === 0) return;
+
+      const currentSnapshot = capturePageState(currentPageIndex);
+      page.undoStack.push(currentSnapshot);
+      const nextSnapshot = page.redoStack.pop();
+
+      resetSelectionState();
+      restorePageState(nextSnapshot, currentPageIndex);
+      updateUndoRedoButtons();
+      redraw();
+      saveProgress();
+    }
+
+    undoBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      undoAction();
+    });
+
+    redoBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      redoAction();
+    });
+    // =========================================================
+
     function scheduleRedraw() {
       if (redrawPending) return;
       redrawPending = true;
@@ -887,7 +1089,7 @@
     }
 
     // =========================================================
-    // 大容量儲存（IndexedDB 優先，避免 iPad Safari 5MB 上限）
+    // 大容量儲存（IndexedDB 優先，避免 5MB 上限）
     // =========================================================
     function openWhiteboardDB() {
       return new Promise((resolve, reject) => {
@@ -946,25 +1148,26 @@
       }
 
       if (parsedPages && parsedPages.length > 0) {
-        pages = parsedPages.map(p => ({ paths: p.paths || [], images: [] }));
+        pages = parsedPages.map(p => ({ paths: p.paths || [], images: [], undoStack: [], redoStack: [] }));
         parsedPages.forEach((p, pIdx) => {
           if (p.images && p.images.length > 0) {
             p.images.forEach(imgItem => {
-              const img = new Image();
-              img.onload = () => {
-                pages[pIdx].images.push({
-                  img: img, x: imgItem.x, y: imgItem.y, w: imgItem.w, h: imgItem.h,
-                  src: imgItem.src,
-                  opacity: imgItem.opacity !== undefined ? imgItem.opacity : 1.0,
-                  rotation: imgItem.rotation || 0
-                });
+              const img = getCachedImage(imgItem.src, () => {
                 if (pIdx === currentPageIndex) redraw();
-              };
-              img.src = imgItem.src;
+              });
+              pages[pIdx].images.push({
+                img: img, x: imgItem.x, y: imgItem.y, w: imgItem.w, h: imgItem.h,
+                src: imgItem.src,
+                opacity: imgItem.opacity !== undefined ? imgItem.opacity : 1.0,
+                rotation: imgItem.rotation || 0
+              });
+              if (img.complete && pIdx === currentPageIndex) redraw();
             });
           }
         });
         switchPage(0);
+      } else {
+        updateUndoRedoButtons();
       }
     }
 
@@ -996,16 +1199,19 @@
     function switchPage(index) {
       if (index < 0 || index >= pages.length) return;
       currentPageIndex = index;
+      if (!pages[currentPageIndex].undoStack) pages[currentPageIndex].undoStack = [];
+      if (!pages[currentPageIndex].redoStack) pages[currentPageIndex].redoStack = [];
       paths = pages[currentPageIndex].paths;
       images = pages[currentPageIndex].images;
       selectedPaths = []; selectedImages = []; groupBounds = null; origGroupBounds = null;
       opacitySubPanel.classList.remove('show');
       updatePageIndicator();
+      updateUndoRedoButtons();
       redraw();
     }
 
     newPageBtn.addEventListener('click', () => {
-      pages.push({ paths: [], images: [] });
+      pages.push({ paths: [], images: [], undoStack: [], redoStack: [] });
       switchPage(pages.length - 1);
       saveProgress();
     });
@@ -1055,10 +1261,13 @@
       return { w, h, cw, ch };
     }
 
-    function placeDataUrlOnPage(pageIdx, dataUrl, dropPos, offsetIdx = 0, centerOnPage = false) {
+    function placeDataUrlOnPage(pageIdx, dataUrl, dropPos, offsetIdx = 0, centerOnPage = false, recordUndo = true) {
       return new Promise((resolve) => {
         const img = new Image();
         img.onload = () => {
+          imageCache.set(dataUrl, img);
+          if (recordUndo) recordUndoStep(pageIdx);
+
           const { w, h, cw, ch } = calculateFittedSize(img.naturalWidth || img.width, img.naturalHeight || img.height);
           let x, y;
           if (centerOnPage || !dropPos) {
@@ -1096,7 +1305,7 @@
       return new Promise((resolve) => {
         const reader = new FileReader();
         reader.onload = async (ev) => {
-          await placeDataUrlOnPage(currentPageIndex, ev.target.result, dropPos, offsetIdx, centerOnPage);
+          await placeDataUrlOnPage(currentPageIndex, ev.target.result, dropPos, offsetIdx, centerOnPage, true);
           resolve();
         };
         reader.onerror = () => resolve();
@@ -1119,7 +1328,6 @@
         for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
           showLoadingToast(`正在匯入 PDF（第 ${pageNum} / ${totalPages} 頁）...`);
           const page = await pdf.getPage(pageNum);
-          // iPad 上使用適中解析度（1.6x）兼顧清晰度與記憶體穩定性
           const viewport = page.getViewport({ scale: 1.6 });
 
           const offCanvas = document.createElement('canvas');
@@ -1135,10 +1343,10 @@
 
           let targetPageIdx = startPageIdx + (pageNum - 1);
           if (targetPageIdx >= pages.length) {
-            pages.push({ paths: [], images: [] });
+            pages.push({ paths: [], images: [], undoStack: [], redoStack: [] });
           }
 
-          await placeDataUrlOnPage(targetPageIdx, dataUrl, null, 0, true);
+          await placeDataUrlOnPage(targetPageIdx, dataUrl, null, 0, true, true);
         }
 
         switchPage(startPageIdx);
@@ -1180,7 +1388,6 @@
       }
     }
 
-    // iPad 點擊「開啟」按鈕選取檔案
     openFileBtn.addEventListener('click', () => {
       filePickerInput.value = '';
       filePickerInput.click();
@@ -1192,7 +1399,6 @@
       }
     });
 
-    // 支援 iPad 剪貼簿直接貼上圖片
     window.addEventListener('paste', (e) => {
       if (loginOverlay.style.display !== 'none' || bootScreen.style.display !== 'none') return;
       if (e.clipboardData && e.clipboardData.files && e.clipboardData.files.length > 0) {
@@ -1201,7 +1407,6 @@
       }
     });
 
-    // 阻止瀏覽器預設拖曳開啟檔案行為
     window.addEventListener('dragover', (e) => e.preventDefault());
     window.addEventListener('drop', (e) => e.preventDefault());
 
@@ -1270,7 +1475,7 @@
       ctx.fillRect(0, 0, width, height);
 
       images.forEach(imgObj => {
-        if (imgObj.img) {
+        if (imgObj.img && imgObj.img.complete && imgObj.img.naturalWidth > 0) {
           ctx.save();
           ctx.globalAlpha = imgObj.opacity !== undefined ? imgObj.opacity : 1.0;
           if (imgObj.rotation) {
@@ -1378,6 +1583,38 @@
         for (let i = 1; i < lassoPoints.length; i++) ctx.lineTo(lassoPoints[i].x, lassoPoints[i].y);
         ctx.stroke(); ctx.restore();
       }
+
+      // 觸控或觸控筆使用一般橡皮擦時，即時繪製等比例橡皮擦圖示
+      if (currentTool === 'eraser' && eraserType === 'normal' && activeTouchEraserPos) {
+        const radius = getNormalEraserRadius();
+        const s = Math.min(124, Math.max(16, Math.round(radius * 2)));
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(activeTouchEraserPos.x, activeTouchEraserPos.y, radius, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(220, 220, 220, 0.35)';
+        ctx.fill();
+        ctx.strokeStyle = '#555';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([4, 3]);
+        ctx.stroke();
+
+        ctx.setLineDash([]);
+        ctx.translate(activeTouchEraserPos.x - s / 2, activeTouchEraserPos.y - s / 2);
+        ctx.scale(s / 24, s / 24);
+        ctx.fillStyle = '#ddd';
+        ctx.strokeStyle = '#333';
+        ctx.lineWidth = 2;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        const bodyPath = new Path2D('M20 20H7L3 16C2 15 2 13 3 12L13 2l9 9-9 9z');
+        ctx.fill(bodyPath);
+        ctx.stroke(bodyPath);
+        ctx.beginPath();
+        ctx.moveTo(6, 11);
+        ctx.lineTo(12, 17);
+        ctx.stroke();
+        ctx.restore();
+      }
     }
 
     function drawSimplePath(points) {
@@ -1436,7 +1673,6 @@
           smoothedSpeed = smoothedSpeed * 0.68 + speed * 0.32;
         }
 
-        // 若有 Apple Pencil 感壓值（pt.p），融合筆壓與運筆速度
         const velocityFactor = 1 / (1 + Math.pow(smoothedSpeed / 7.5, 1.35));
         const combinedFactor = (points[i].p !== null && points[i].p !== undefined)
           ? (velocityFactor * 0.45 + Math.min(1, Math.max(0, points[i].p * 1.15)) * 0.55)
@@ -1547,6 +1783,7 @@
     selectToolBtn.addEventListener('click', () => {
       currentTool = 'select'; selectToolBtn.classList.add('active');
       penMenuBtn.classList.remove('active'); eraserMenuBtn.classList.remove('active');
+      activeTouchEraserPos = null;
       canvas.style.cursor = '';
       canvas.className = 'select-cursor'; penDropdown.classList.remove('show-sub'); eraserDropdown.classList.remove('show-sub');
       advancedPanel.classList.remove('show'); redraw();
@@ -1578,8 +1815,13 @@
       opacityValText.textContent = opacityRange.value + '%';
     });
 
+    opacityRange.addEventListener('pointerdown', () => {
+      opacityDragSnapshot = capturePageState();
+    });
+
     opacityRange.addEventListener('input', (e) => {
       e.stopPropagation();
+      if (!opacityDragSnapshot) opacityDragSnapshot = capturePageState();
       const val = parseInt(e.target.value) / 100;
       opacityValText.textContent = e.target.value + '%';
       selectedImages.forEach(img => img.opacity = val);
@@ -1588,13 +1830,31 @@
       scheduleRedraw(); saveProgress();
     });
 
+    opacityRange.addEventListener('change', () => {
+      if (opacityDragSnapshot && !isSamePageState(opacityDragSnapshot, capturePageState())) {
+        pushHistorySnapshot(opacityDragSnapshot);
+      }
+      opacityDragSnapshot = null;
+    });
+
     document.getElementById('menuSelect').addEventListener('click', () => { objectMenu.classList.remove('show'); opacitySubPanel.classList.remove('show'); });
-    document.getElementById('menuDelete').addEventListener('click', () => { deleteSelected(); objectMenu.classList.remove('show'); opacitySubPanel.classList.remove('show'); });
+    document.getElementById('menuDelete').addEventListener('click', () => {
+      recordUndoStep();
+      deleteSelected();
+      objectMenu.classList.remove('show'); opacitySubPanel.classList.remove('show');
+    });
     document.getElementById('menuCopy').addEventListener('click', () => { copySelected(); objectMenu.classList.remove('show'); opacitySubPanel.classList.remove('show'); });
-    document.getElementById('menuCut').addEventListener('click', () => { copySelected(); deleteSelected(); objectMenu.classList.remove('show'); opacitySubPanel.classList.remove('show'); });
+    document.getElementById('menuCut').addEventListener('click', () => {
+      recordUndoStep();
+      copySelected();
+      deleteSelected();
+      objectMenu.classList.remove('show'); opacitySubPanel.classList.remove('show');
+    });
     
     document.getElementById('menuPaste').addEventListener('click', (e) => {
-      e.stopPropagation(); pasteClipboardAt(menuOpenPos.x, menuOpenPos.y); canvasMenu.style.display = 'none';
+      e.stopPropagation();
+      pasteClipboardAt(menuOpenPos.x, menuOpenPos.y);
+      canvasMenu.style.display = 'none';
     });
 
     function deleteSelected() {
@@ -1607,11 +1867,14 @@
 
     function copySelected() {
       clipboard.paths = JSON.parse(JSON.stringify(selectedPaths));
-      clipboard.images = JSON.parse(JSON.stringify(selectedImages));
+      clipboard.images = selectedImages.map(img => ({
+        x: img.x, y: img.y, w: img.w, h: img.h, src: img.src, opacity: img.opacity, rotation: img.rotation
+      }));
     }
 
     function pasteClipboardAt(posX, posY) {
       if (clipboard.paths.length === 0 && clipboard.images.length === 0) return;
+      recordUndoStep();
       selectedPaths = []; selectedImages = [];
       let minX = Infinity, minY = Infinity;
       clipboard.paths.forEach(p => p.points.forEach(pt => { if(pt.x < minX) minX = pt.x; if(pt.y < minY) minY = pt.y; }));
@@ -1623,10 +1886,16 @@
         newP.points.forEach(pt => { pt.x += offsetX; pt.y += offsetY; });
         paths.push(newP); selectedPaths.push(newP);
       });
+      if (clipboard.images.length === 0) {
+        pages[currentPageIndex].paths = paths; pages[currentPageIndex].images = images;
+        updateGroupBounds(); prepareTransformBackup(); redraw(); saveProgress();
+        return;
+      }
       let loadedCount = 0;
       clipboard.images.forEach(item => {
         const img = new Image();
         img.onload = () => {
+          imageCache.set(item.src, img);
           const newImgObj = { img: img, x: item.x + offsetX, y: item.y + offsetY, w: item.w, h: item.h, src: item.src, opacity: item.opacity, rotation: item.rotation };
           images.push(newImgObj); selectedImages.push(newImgObj); loadedCount++;
           if (loadedCount === clipboard.images.length) {
@@ -1636,10 +1905,6 @@
         };
         img.src = item.src;
       });
-      if (clipboard.images.length === 0) {
-        pages[currentPageIndex].paths = paths; pages[currentPageIndex].images = images;
-        updateGroupBounds(); prepareTransformBackup(); redraw(); saveProgress();
-      }
     }
 
     function prepareTransformBackup() {
@@ -1685,7 +1950,6 @@
           console.log("外部螢幕擷取未啟用，改用白板局部擷取", err);
         }
       }
-      // iPad Safari 支援白板畫面直接局部圈選複製
       launchSnippingWithImage(canvas.toDataURL('image/png'));
     });
 
@@ -1744,6 +2008,8 @@
         const dataUrl = cropCanvas.toDataURL('image/png');
         const newImg = new Image();
         newImg.onload = () => {
+          imageCache.set(dataUrl, newImg);
+          recordUndoStep();
           images.push({ img: newImg, x: rx + 16, y: ry + 16, w: rw, h: rh, src: dataUrl, opacity: 1.0, rotation: 0 });
           pages[currentPageIndex].images = images; redraw(); saveProgress();
         };
@@ -1757,6 +2023,27 @@
     function positionPopupNearButton(btn, popupEl) {
       const rect = btn.getBoundingClientRect();
       popupEl.style.top = Math.min(window.innerHeight - 280, Math.max(12, rect.top)) + 'px';
+    }
+
+    function syncAdvancedPanelForTool() {
+      if (currentTool === 'eraser') {
+        // 橡皮擦模式：隱藏調色盤，只顯示粗細（寬度）
+        colorTabBtn.style.display = 'none';
+        colorTabBtn.classList.remove('active');
+        colorTabContent.classList.remove('active');
+
+        widthTabBtn.style.display = '';
+        widthTabBtn.classList.add('active');
+        widthTabContent.classList.add('active');
+      } else if (currentTool === 'pen') {
+        // 畫筆模式：恢復顯示顏色與寬度兩個分頁
+        colorTabBtn.style.display = '';
+        widthTabBtn.style.display = '';
+        if (!colorTabBtn.classList.contains('active') && !widthTabBtn.classList.contains('active')) {
+          colorTabBtn.classList.add('active');
+          colorTabContent.classList.add('active');
+        }
+      }
     }
 
     penMenuBtn.addEventListener('click', (e) => {
@@ -1776,7 +2063,10 @@
     });
 
     colorBtn.addEventListener('click', (e) => {
+      // 選取模式下點擊笑臉毫無作用
+      if (currentTool === 'select') return;
       e.stopPropagation();
+      syncAdvancedPanelForTool();
       positionPopupNearButton(colorBtn, advancedPanel);
       advancedPanel.classList.toggle('show');
       penDropdown.classList.remove('show-sub');
@@ -1788,6 +2078,7 @@
     panelTabs.forEach(tab => {
       tab.addEventListener('click', (e) => {
         e.stopPropagation();
+        if (currentTool === 'eraser' && tab.getAttribute('data-tab') === 'colorTab') return;
         panelTabs.forEach(t => t.classList.remove('active'));
         tabContents.forEach(c => c.classList.remove('active'));
         tab.classList.add('active');
@@ -1803,9 +2094,29 @@
       if (!canvasMenu.contains(e.target)) canvasMenu.style.display = 'none';
     });
 
+    function getNormalEraserRadius() {
+      return Math.max(6, eraserSize * 1.2);
+    }
+
+    function updateEraserCursor() {
+      if (currentTool === 'eraser' && eraserType === 'normal') {
+        const diameter = Math.round(getNormalEraserRadius() * 2);
+        const s = Math.min(124, Math.max(16, diameter));
+        const half = Math.round(s / 2);
+        const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${s}" height="${s}" viewBox="0 0 24 24" fill="%23ddd" stroke="%23333" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20H7L3 16C2 15 2 13 3 12L13 2l9 9-9 9z"/><path d="M6 11l6 6"/></svg>`;
+        canvas.className = '';
+        canvas.style.cursor = `url('data:image/svg+xml;utf8,${svg}') ${half} ${half}, auto`;
+      } else if (currentTool === 'eraser') {
+        canvas.style.cursor = '';
+        canvas.className = 'eraser-cursor';
+      }
+    }
+
     function setPenType(type) {
+      const wasEraser = (currentTool === 'eraser');
       currentTool = 'pen'; selectToolBtn.classList.remove('active');
       penType = type; penMenuBtn.classList.add('active'); eraserMenuBtn.classList.remove('active');
+      activeTouchEraserPos = null;
       document.querySelectorAll('#penDropdown .sub-menu button').forEach(b => b.classList.remove('active'));
       const activeId = 'type' + (
         type === 'normal' ? 'Normal' :
@@ -1815,6 +2126,15 @@
       document.getElementById(activeId).classList.add('active');
       canvas.style.cursor = '';
       canvas.className = 'brush-cursor'; sizeRange.value = penSize; updateSizeUI(penSize);
+      if (wasEraser) {
+        colorTabBtn.style.display = '';
+        colorTabBtn.classList.add('active');
+        colorTabContent.classList.add('active');
+        widthTabBtn.classList.remove('active');
+        widthTabContent.classList.remove('active');
+      } else {
+        syncAdvancedPanelForTool();
+      }
       selectedPaths = []; selectedImages = []; groupBounds = null; origGroupBounds = null; redraw();
     }
     document.getElementById('typeNormal').addEventListener('click', (e) => { e.stopPropagation(); setPenType('normal'); penDropdown.classList.remove('show-sub'); });
@@ -1825,10 +2145,12 @@
     function setEraserType(type) {
       currentTool = 'eraser'; selectToolBtn.classList.remove('active');
       eraserType = type; eraserMenuBtn.classList.add('active'); penMenuBtn.classList.remove('active');
+      activeTouchEraserPos = null;
       document.querySelectorAll('#eraserDropdown .sub-menu button').forEach(b => b.classList.remove('active'));
       document.getElementById('erase' + (type === 'normal' ? 'Normal' : type === 'object' ? 'Object' : 'Lasso')).classList.add('active');
-      canvas.style.cursor = '';
-      canvas.className = 'eraser-cursor'; sizeRange.value = eraserSize; updateSizeUI(eraserSize);
+      sizeRange.value = eraserSize; updateSizeUI(eraserSize);
+      updateEraserCursor();
+      syncAdvancedPanelForTool();
       selectedPaths = []; selectedImages = []; groupBounds = null; origGroupBounds = null; redraw();
     }
     document.getElementById('eraseNormal').addEventListener('click', (e) => { e.stopPropagation(); setEraserType('normal'); eraserDropdown.classList.remove('show-sub'); });
@@ -1845,8 +2167,14 @@
     function updateSizeUI(val) {
       sizePreviewDot.style.width = Math.min(45, Math.max(4, val)) + 'px';
       sizePreviewDot.style.height = Math.min(45, Math.max(4, val)) + 'px';
-      if (currentTool === 'eraser') { eraserSize = parseInt(val); sizeLabelTitle.textContent = "橡皮擦大小調整"; }
-      else { penSize = parseInt(val); sizeLabelTitle.textContent = "筆大小調整"; }
+      if (currentTool === 'eraser') {
+        eraserSize = parseInt(val);
+        sizeLabelTitle.textContent = "橡皮擦大小調整";
+        updateEraserCursor();
+      } else {
+        penSize = parseInt(val);
+        sizeLabelTitle.textContent = "筆大小調整";
+      }
     }
 
     sizeRange.addEventListener('input', (e) => { e.stopPropagation(); updateSizeUI(sizeRange.value); });
@@ -1881,7 +2209,6 @@
 
     function hitTestHandle(pos) {
       if (!groupBounds) return null;
-      // 放大觸控感應半徑，方便在 iPad 上用手指或 Apple Pencil 精準拖曳
       const rotX = groupBounds.x + groupBounds.w / 2, rotY = groupBounds.y - 26;
       if (Math.hypot(pos.x - rotX, pos.y - rotY) < 18) return 'rotating';
 
@@ -1925,6 +2252,7 @@
         if (groupBounds) {
           const handle = hitTestHandle(pos);
           if (handle) {
+            pendingHistorySnapshot = capturePageState();
             interactionState = handle;
             dragStartX = pos.x; dragStartY = pos.y;
             prepareTransformBackup();
@@ -1936,6 +2264,7 @@
             return;
           }
           if (pos.x >= groupBounds.x && pos.x <= groupBounds.x + groupBounds.w && pos.y >= groupBounds.y && pos.y <= groupBounds.y + groupBounds.h) {
+            pendingHistorySnapshot = capturePageState();
             interactionState = 'dragging';
             dragStartX = pos.x; dragStartY = pos.y;
             prepareTransformBackup();
@@ -1946,6 +2275,7 @@
         }
         const hit = hitTestObject(pos);
         if (hit) {
+          pendingHistorySnapshot = capturePageState();
           selectedPaths = hit.type === 'path' ? [hit.obj] : [];
           selectedImages = hit.type === 'image' ? [hit.obj] : [];
           updateGroupBounds(); prepareTransformBackup(); interactionState = 'dragging';
@@ -1959,13 +2289,21 @@
         objectMenu.classList.remove('show'); opacitySubPanel.classList.remove('show'); redraw();
       } else {
         isDrawing = true;
+        pendingHistorySnapshot = capturePageState();
         if (currentTool === 'pen') {
           const stampedPos = { x: pos.x, y: pos.y, t: performance.now(), p: pos.p };
           currentPath = { type: penType, color: currentColor, size: parseInt(sizeRange.value), points: [stampedPos], opacity: 1.0, rotation: 0 };
           paths.push(currentPath); pages[currentPageIndex].paths = paths; scheduleRedraw();
         } else if (currentTool === 'eraser' && eraserType === 'lasso') { lassoPoints = [pos]; scheduleRedraw(); }
         else if (currentTool === 'eraser' && eraserType === 'object') { eraseObjectAt(pos); }
-        else if (currentTool === 'eraser' && eraserType === 'normal') { lastEraserPos = pos; eraseLocalSegmentAt(pos); }
+        else if (currentTool === 'eraser' && eraserType === 'normal') {
+          if (e.pointerType !== 'mouse') {
+            activeTouchEraserPos = pos;
+            scheduleRedraw();
+          }
+          lastEraserPos = pos;
+          eraseAlongSegment(pos, pos);
+        }
       }
     }
 
@@ -2116,8 +2454,21 @@
             scheduleRedraw();
           }
         } else if (currentTool === 'eraser' && eraserType === 'normal') {
-          if (lastEraserPos && Math.hypot(pos.x - lastEraserPos.x, pos.y - lastEraserPos.y) < 3) return;
-          eraseLocalSegmentAt(pos); lastEraserPos = pos;
+          const coalesced = (typeof e.getCoalescedEvents === 'function') ? e.getCoalescedEvents() : null;
+          if (coalesced && coalesced.length > 0) {
+            for (let i = 0; i < coalesced.length; i++) {
+              const subPos = getPointerPos(coalesced[i]);
+              eraseAlongSegment(lastEraserPos || subPos, subPos);
+              lastEraserPos = subPos;
+            }
+          } else {
+            eraseAlongSegment(lastEraserPos || pos, pos);
+            lastEraserPos = pos;
+          }
+          if (e.pointerType !== 'mouse') {
+            activeTouchEraserPos = pos;
+            scheduleRedraw();
+          }
         } else if (currentTool === 'eraser' && eraserType === 'object') { eraseObjectAt(pos); }
         else if (currentTool === 'eraser' && eraserType === 'lasso') { lassoPoints.push(pos); scheduleRedraw(); }
       }
@@ -2125,12 +2476,20 @@
 
     function endAction() {
       lastEraserPos = null;
+      if (activeTouchEraserPos) {
+        activeTouchEraserPos = null;
+        redraw();
+      }
       if (currentTool === 'select') {
         if (interactionState) {
           interactionState = null;
           canvas.style.cursor = 'default';
           prepareTransformBackup();
           redraw();
+          if (pendingHistorySnapshot && !isSamePageState(pendingHistorySnapshot, capturePageState())) {
+            pushHistorySnapshot(pendingHistorySnapshot);
+          }
+          pendingHistorySnapshot = null;
           saveProgress();
         } else if (isSelecting) {
           isSelecting = false;
@@ -2156,11 +2515,15 @@
           paths = paths.filter(p => !p.points.some(pt => isPointInPolygon(pt, lassoPoints)));
           pages[currentPageIndex].paths = paths; lassoPoints = []; redraw();
         } else if (currentTool === 'eraser' && eraserType === 'lasso') { lassoPoints = []; redraw(); }
+        if (pendingHistorySnapshot && !isSamePageState(pendingHistorySnapshot, capturePageState())) {
+          pushHistorySnapshot(pendingHistorySnapshot);
+        }
+        pendingHistorySnapshot = null;
+        currentPath = null;
         saveProgress();
       }
     }
 
-    // 統一使用 Pointer Events（同時支援 iPad 手指觸控、Apple Pencil 感壓與滑鼠）
     canvas.addEventListener('pointerdown', (e) => {
       if (e.button !== undefined && e.button !== 0 && e.button !== 2) return;
       if (activePointerId !== null && e.pointerType === 'touch') return;
@@ -2210,33 +2573,292 @@
     canvas.addEventListener('contextmenu', e => e.preventDefault());
 
     window.addEventListener('keydown', (e) => {
-      if (currentTool === 'select' && (selectedPaths.length > 0 || selectedImages.length > 0)) {
-        if (e.key === 'Delete' || e.key === 'Backspace') { deleteSelected(); saveProgress(); }
-        if ((e.ctrlKey || e.metaKey) && e.key === 'c') copySelected();
-        if ((e.ctrlKey || e.metaKey) && e.key === 'x') { copySelected(); deleteSelected(); saveProgress(); }
+      if (loginOverlay.style.display !== 'none' || bootScreen.style.display !== 'none') return;
+      const tag = document.activeElement && document.activeElement.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+
+      // 快捷鍵：上一步 (Ctrl+Z / Cmd+Z) 與 下一步 (Ctrl+Y / Ctrl+Shift+Z / Cmd+Shift+Z)
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        undoAction();
+        return;
       }
-      if ((e.ctrlKey || e.metaKey) && e.key === 'v') { pasteClipboardAt(); saveProgress(); }
+      if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'y' || (e.key.toLowerCase() === 'z' && e.shiftKey))) {
+        e.preventDefault();
+        redoAction();
+        return;
+      }
+
+      if (currentTool === 'select' && (selectedPaths.length > 0 || selectedImages.length > 0)) {
+        if (e.key === 'Delete' || e.key === 'Backspace') {
+          recordUndoStep();
+          deleteSelected();
+          saveProgress();
+        }
+        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c') copySelected();
+        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'x') {
+          recordUndoStep();
+          copySelected();
+          deleteSelected();
+          saveProgress();
+        }
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
+        pasteClipboardAt();
+        saveProgress();
+      }
     });
 
-    function eraseLocalSegmentAt(pos) {
-      const radius = Math.max(12, parseInt(sizeRange.value) * 1.2);
-      let newPaths = [], changed = false;
-      paths.forEach(p => {
-        if (!p.points || p.points.length === 0) return;
-        let currentSegment = [];
-        p.points.forEach(pt => {
-          if (Math.hypot(pt.x - pos.x, pt.y - pos.y) > radius) {
-            currentSegment.push(pt);
+    // =========================================================
+    // 平滑一般橡皮擦核心演算法（連續軌跡膠囊 + 線段精準切割）
+    // =========================================================
+    function bakePathRotation(p) {
+      if (!p.rotation) return;
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      p.points.forEach(pt => {
+        if (pt.x < minX) minX = pt.x;
+        if (pt.y < minY) minY = pt.y;
+        if (pt.x > maxX) maxX = pt.x;
+        if (pt.y > maxY) maxY = pt.y;
+      });
+      const cx = (minX + maxX) / 2;
+      const cy = (minY + maxY) / 2;
+      const cos = Math.cos(p.rotation);
+      const sin = Math.sin(p.rotation);
+      p.points.forEach(pt => {
+        const dx = pt.x - cx;
+        const dy = pt.y - cy;
+        pt.x = cx + dx * cos - dy * sin;
+        pt.y = cy + dx * sin + dy * cos;
+      });
+      p.rotation = 0;
+    }
+
+    function intersectSegmentCircle(ax, ay, dx, dy, cx, cy, r) {
+      const fx = ax - cx;
+      const fy = ay - cy;
+      const a = dx * dx + dy * dy;
+      if (a < 1e-10) {
+        return (fx * fx + fy * fy <= r * r) ? [0, 1] : null;
+      }
+      const b = 2 * (fx * dx + fy * dy);
+      const c = fx * fx + fy * fy - r * r;
+      const disc = b * b - 4 * a * c;
+      if (disc < 0) return null;
+      const sqrtDisc = Math.sqrt(disc);
+      const t1 = (-b - sqrtDisc) / (2 * a);
+      const t2 = (-b + sqrtDisc) / (2 * a);
+      const enter = Math.max(0, t1);
+      const exit = Math.min(1, t2);
+      return enter <= exit ? [enter, exit] : null;
+    }
+
+    function intersectSegmentCapsule(ax, ay, bx, by, e1x, e1y, e2x, e2y, r) {
+      const dx = bx - ax;
+      const dy = by - ay;
+      let enter = Infinity;
+      let exit = -Infinity;
+      let hit = false;
+
+      const c1 = intersectSegmentCircle(ax, ay, dx, dy, e1x, e1y, r);
+      if (c1) {
+        enter = Math.min(enter, c1[0]);
+        exit = Math.max(exit, c1[1]);
+        hit = true;
+      }
+
+      const ux = e2x - e1x;
+      const uy = e2y - e1y;
+      const lenSq = ux * ux + uy * uy;
+
+      if (lenSq > 1e-8) {
+        const c2 = intersectSegmentCircle(ax, ay, dx, dy, e2x, e2y, r);
+        if (c2) {
+          enter = Math.min(enter, c2[0]);
+          exit = Math.max(exit, c2[1]);
+          hit = true;
+        }
+
+        const len = Math.sqrt(lenSq);
+        const invLen = 1 / len;
+        const tx = ux * invLen;
+        const ty = uy * invLen;
+        const nx = -ty;
+        const ny = tx;
+
+        const relX = ax - e1x;
+        const relY = ay - e1y;
+
+        const s0 = relX * tx + relY * ty;
+        const ds = dx * tx + dy * ty;
+        const n0 = relX * nx + relY * ny;
+        const dn = dx * nx + dy * ny;
+
+        let tMin = 0;
+        let tMax = 1;
+        let rectValid = true;
+
+        if (Math.abs(ds) < 1e-10) {
+          if (s0 < 0 || s0 > len) rectValid = false;
+        } else {
+          let ta = -s0 / ds;
+          let tb = (len - s0) / ds;
+          if (ta > tb) { const tmp = ta; ta = tb; tb = tmp; }
+          tMin = Math.max(tMin, ta);
+          tMax = Math.min(tMax, tb);
+          if (tMin > tMax) rectValid = false;
+        }
+
+        if (rectValid) {
+          if (Math.abs(dn) < 1e-10) {
+            if (n0 < -r || n0 > r) rectValid = false;
           } else {
+            let ta = (-r - n0) / dn;
+            let tb = (r - n0) / dn;
+            if (ta > tb) { const tmp = ta; ta = tb; tb = tmp; }
+            tMin = Math.max(tMin, ta);
+            tMax = Math.min(tMax, tb);
+            if (tMin > tMax) rectValid = false;
+          }
+        }
+
+        if (rectValid) {
+          enter = Math.min(enter, tMin);
+          exit = Math.max(exit, tMax);
+          hit = true;
+        }
+      }
+
+      return hit ? [enter, exit] : null;
+    }
+
+    function interpolateStrokePoint(a, b, t) {
+      if (t <= 1e-4) return { x: a.x, y: a.y, t: a.t, p: a.p };
+      if (t >= 1 - 1e-4) return { x: b.x, y: b.y, t: b.t, p: b.p };
+      return {
+        x: a.x + (b.x - a.x) * t,
+        y: a.y + (b.y - a.y) * t,
+        t: (a.t !== undefined && b.t !== undefined) ? a.t + (b.t - a.t) * t : a.t,
+        p: (a.p !== null && a.p !== undefined && b.p !== null && b.p !== undefined) ? a.p + (b.p - a.p) * t : a.p
+      };
+    }
+
+    function pushPointDedup(seg, pt) {
+      if (seg.length === 0) {
+        seg.push(pt);
+        return;
+      }
+      const prev = seg[seg.length - 1];
+      if (Math.hypot(pt.x - prev.x, pt.y - prev.y) > 0.05) {
+        seg.push(pt);
+      }
+    }
+
+    function eraseAlongSegment(pos1, pos2) {
+      const radius = getNormalEraserRadius();
+      const capMinX = Math.min(pos1.x, pos2.x) - radius;
+      const capMaxX = Math.max(pos1.x, pos2.x) + radius;
+      const capMinY = Math.min(pos1.y, pos2.y) - radius;
+      const capMaxY = Math.max(pos1.y, pos2.y) + radius;
+
+      const newPaths = [];
+      let changed = false;
+
+      for (let idx = 0; idx < paths.length; idx++) {
+        const p = paths[idx];
+        if (!p.points || p.points.length === 0) continue;
+
+        let pMinX = Infinity, pMinY = Infinity, pMaxX = -Infinity, pMaxY = -Infinity;
+        for (let k = 0; k < p.points.length; k++) {
+          const pt = p.points[k];
+          if (pt.x < pMinX) pMinX = pt.x;
+          if (pt.y < pMinY) pMinY = pt.y;
+          if (pt.x > pMaxX) pMaxX = pt.x;
+          if (pt.y > pMaxY) pMaxY = pt.y;
+        }
+
+        if (p.rotation) {
+          const cx = (pMinX + pMaxX) / 2;
+          const cy = (pMinY + pMaxY) / 2;
+          const halfDiag = Math.hypot(pMaxX - pMinX, pMaxY - pMinY) / 2;
+          if (cx + halfDiag < capMinX || cx - halfDiag > capMaxX || cy + halfDiag < capMinY || cy - halfDiag > capMaxY) {
+            newPaths.push(p);
+            continue;
+          }
+          bakePathRotation(p);
+        } else {
+          if (pMaxX < capMinX || pMinX > capMaxX || pMaxY < capMinY || pMinY > capMaxY) {
+            newPaths.push(p);
+            continue;
+          }
+        }
+
+        if (p.points.length === 1) {
+          const pt = p.points[0];
+          const hit = intersectSegmentCapsule(pt.x, pt.y, pt.x, pt.y, pos1.x, pos1.y, pos2.x, pos2.y, radius);
+          if (hit) {
             changed = true;
-            if (currentSegment.length > 0) newPaths.push({ type: p.type, color: p.color, size: p.size, opacity: p.opacity, rotation: p.rotation, points: currentSegment });
+          } else {
+            newPaths.push(p);
+          }
+          continue;
+        }
+
+        let currentSegment = [];
+        let pathModified = false;
+
+        const flushSegment = () => {
+          if (currentSegment.length > 0) {
+            newPaths.push({
+              type: p.type,
+              color: p.color,
+              size: p.size,
+              opacity: p.opacity,
+              rotation: 0,
+              points: currentSegment
+            });
             currentSegment = [];
           }
-        });
-        if (currentSegment.length > 0) newPaths.push({ type: p.type, color: p.color, size: p.size, opacity: p.opacity, rotation: p.rotation, points: currentSegment });
-      });
-      if (changed) { paths = newPaths; pages[currentPageIndex].paths = paths; scheduleRedraw(); }
+        };
+
+        for (let i = 0; i < p.points.length - 1; i++) {
+          const a = p.points[i];
+          const b = p.points[i + 1];
+          const hit = intersectSegmentCapsule(a.x, a.y, b.x, b.y, pos1.x, pos1.y, pos2.x, pos2.y, radius);
+
+          if (!hit) {
+            pushPointDedup(currentSegment, { x: a.x, y: a.y, t: a.t, p: a.p });
+            pushPointDedup(currentSegment, { x: b.x, y: b.y, t: b.t, p: b.p });
+          } else {
+            pathModified = true;
+            changed = true;
+            const [tEnter, tExit] = hit;
+            if (tEnter > 1e-4) {
+              pushPointDedup(currentSegment, { x: a.x, y: a.y, t: a.t, p: a.p });
+              pushPointDedup(currentSegment, interpolateStrokePoint(a, b, tEnter));
+            }
+            flushSegment();
+            if (tExit < 1 - 1e-4) {
+              pushPointDedup(currentSegment, interpolateStrokePoint(a, b, tExit));
+              pushPointDedup(currentSegment, { x: b.x, y: b.y, t: b.t, p: b.p });
+            }
+          }
+        }
+
+        if (!pathModified) {
+          newPaths.push(p);
+        } else {
+          flushSegment();
+        }
+      }
+
+      if (changed) {
+        paths = newPaths;
+        pages[currentPageIndex].paths = paths;
+        scheduleRedraw();
+      }
     }
+    // =========================================================
 
     function eraseObjectAt(pos) {
       const radius = Math.max(20, parseInt(sizeRange.value) * 1.5);
@@ -2260,6 +2882,9 @@
     }
 
     clearBtn.addEventListener('click', () => {
+      if (paths.length > 0 || images.length > 0) {
+        recordUndoStep();
+      }
       pages[currentPageIndex].paths = []; pages[currentPageIndex].images = [];
       paths = pages[currentPageIndex].paths; images = pages[currentPageIndex].images;
       selectedPaths = []; selectedImages = []; groupBounds = null; origGroupBounds = null;
